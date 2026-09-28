@@ -10,148 +10,178 @@ import {
   FaCloudSun,
   FaMapLocationDot,
   FaLeaf,
-  FaSun,
-  FaMoon,
   FaQuoteLeft,
 } from "react-icons/fa6";
 
+import "./Home.css";
+
 function Home() {
-  const [city, setCity] = useState("Hyderabad");
-
   const [weather, setWeather] = useState(null);
-
   const [forecast, setForecast] = useState([]);
-
   const [loading, setLoading] = useState(false);
-
   const [error, setError] = useState("");
 
-  const fetchWeather = async (searchCity) => {
+  const [selectedPlace, setSelectedPlace] = useState({
+    name: "Hyderabad",
+    mandal: "",
+    district: "",
+    state: "Telangana",
+    latitude: null,
+    longitude: null,
+  });
+
+  // FETCH WEATHER
+  const fetchWeather = async (place) => {
+    setLoading(true);
+    setError("");
+
     try {
-      setLoading(true);
-      setError("");
-
-      // =========================
-      // CURRENT WEATHER
-      // =========================
-
-      const weatherResponse = await fetch(
-        `http://localhost:5000/api/weather?city=${encodeURIComponent(
-          searchCity
-        )}`
-      );
-
-      const weatherData = await weatherResponse.json();
-
-      if (!weatherResponse.ok || !weatherData.success) {
-        throw new Error(
-          weatherData.message ||
-            "Unable to fetch weather"
-        );
-      }
-
-      setWeather(weatherData);
-      setCity(weatherData.city);
-
-
-      // =========================
-      // 5 DAY FORECAST
-      // =========================
-
-      const forecastResponse = await fetch(
-        `http://localhost:5000/api/weather/forecast?city=${encodeURIComponent(
-          searchCity
-        )}`
-      );
-
-      const forecastData =
-        await forecastResponse.json();
-
-      console.log(
-        "5 DAY FORECAST:",
-        forecastData
-      );
+      let weatherUrl;
 
       if (
-        !forecastResponse.ok ||
-        !forecastData.success ||
-        !Array.isArray(
-          forecastData.forecast
-        )
+        place.latitude !== null &&
+        place.latitude !== undefined &&
+        place.longitude !== null &&
+        place.longitude !== undefined
       ) {
-        throw new Error(
-          forecastData.message ||
-            "Unable to fetch 5-day forecast"
-        );
+        weatherUrl =
+          "https://weather-report-backend-iuxb.onrender.com/api/weather?lat=" +
+          encodeURIComponent(place.latitude) +
+          "&lon=" +
+          encodeURIComponent(place.longitude);
+      } else {
+        weatherUrl =
+          "https://weather-report-backend-iuxb.onrender.com/api/weather?city=" +
+          encodeURIComponent(place.name);
       }
 
-      setForecast(
-        forecastData.forecast
-      );
+      console.log("Weather URL:", weatherUrl);
 
-    } catch (err) {
+      const response = await fetch(weatherUrl);
+      const data = await response.json();
 
-      console.error(
-        "Weather Error:",
-        err
-      );
+      if (!response.ok || !data.success) {
+        throw new Error(data.message || "Weather fetch failed");
+      }
 
-      setError(
-        err.message ||
-          "Unable to fetch weather data"
-      );
+      setWeather({
+        ...data,
+        city: place.name || data.city || "Unknown",
+        mandal: place.mandal || data.mandal || "",
+        district: place.district || data.district || "",
+        state: place.state || data.state || "Andhra Pradesh",
+      });
 
+      // FORECAST
+      try {
+        let forecastUrl;
+
+        if (
+          place.latitude !== null &&
+          place.latitude !== undefined &&
+          place.longitude !== null &&
+          place.longitude !== undefined
+        ) {
+          forecastUrl =
+            "https://weather-report-backend-iuxb.onrender.com/api/weather/forecast?lat=" +
+            encodeURIComponent(place.latitude) +
+            "&lon=" +
+            encodeURIComponent(place.longitude);
+        } else {
+          forecastUrl =
+            "https://weather-report-backend-iuxb.onrender.com/api/weather/forecast?city=" +
+            encodeURIComponent(place.name);
+        }
+
+        const forecastResponse = await fetch(forecastUrl);
+        const forecastData = await forecastResponse.json();
+
+        if (
+          forecastResponse.ok &&
+          forecastData.success &&
+          Array.isArray(forecastData.forecast)
+        ) {
+          setForecast(forecastData.forecast.slice(0, 5));
+        } else {
+          setForecast([]);
+        }
+      } catch (forecastError) {
+        console.log("Forecast error:", forecastError);
+        setForecast([]);
+      }
+    } catch (weatherError) {
+      console.log("Weather error:", weatherError);
+
+      setWeather(null);
       setForecast([]);
-
+      setError("Unable to fetch weather for this place.");
     } finally {
-
       setLoading(false);
-
     }
   };
 
-
-  // =========================
-  // FIRST LOAD
-  // =========================
-
+  // DEFAULT WEATHER
   useEffect(() => {
-
-    fetchWeather("Hyderabad");
-
+    fetchWeather(selectedPlace);
   }, []);
 
-
-  // =========================
-  // SEARCH
-  // =========================
-
-  const handleSearch = (searchCity) => {
-
-    if (
-      !searchCity ||
-      !searchCity.trim()
-    ) {
+  // LOCATION RESULT CLICK
+  const handleLocationSelect = (place) => {
+    if (!place) {
       return;
     }
 
-    fetchWeather(
-      searchCity.trim()
-    );
+    const exactPlace = {
+      name: place.name || "",
+      mandal: place.mandal || "",
+      district: place.district || "",
+      state: place.state || "Andhra Pradesh",
 
+      latitude:
+        place.latitude !== undefined && place.latitude !== null
+          ? Number(place.latitude)
+          : null,
+
+      longitude:
+        place.longitude !== undefined && place.longitude !== null
+          ? Number(place.longitude)
+          : null,
+    };
+
+    console.log("EXACT SELECTED PLACE:", exactPlace);
+
+    setSelectedPlace(exactPlace);
+    fetchWeather(exactPlace);
   };
 
+  // NORMAL SEARCH
+  const handleNormalSearch = (searchText) => {
+    if (!searchText || !searchText.trim()) {
+      return;
+    }
+
+    const place = {
+      name: searchText.trim(),
+      mandal: "",
+      district: "",
+      state: "Andhra Pradesh",
+      latitude: null,
+      longitude: null,
+    };
+
+    setSelectedPlace(place);
+    fetchWeather(place);
+  };
 
   return (
-    <main className="weather-page">
+    <div className="home-page">
 
-      {/* ================= HERO ================= */}
-
+      {/* HEADER */}
       <section className="hero-section">
 
-        <p className="hello-text">
+        <div className="hello-text">
           Hello there! 👋
-        </p>
+        </div>
 
         <h1 className="main-title">
           Weather <span>Report</span>
@@ -161,247 +191,150 @@ function Home() {
           Stay ahead with accurate weather updates
         </p>
 
-        <SearchBar
-          onSearch={handleSearch}
-        />
+        {/* SEARCH */}
+        <div className="search-wrapper">
+          <SearchBar
+            onSearch={handleLocationSelect}
+            onNormalSearch={handleNormalSearch}
+          />
+        </div>
 
         {loading && (
-          <p
-            style={{
-              marginTop: "15px",
-              fontWeight: "600",
-            }}
-          >
+          <div className="loading-text">
             Loading weather...
-          </p>
+          </div>
         )}
 
-        {error && (
-          <p
-            style={{
-              marginTop: "15px",
-              color: "#d32f2f",
-              fontWeight: "600",
-            }}
-          >
+        {error && !loading && (
+          <div className="error-text">
             {error}
-          </p>
+          </div>
         )}
 
       </section>
 
+      {/* MAIN CONTENT */}
+      <main className="weather-content">
 
-      {/* ================= CURRENT WEATHER ================= */}
+        <div className="top-content">
 
-      <section className="dashboard-grid">
+          {/* WEATHER CARD */}
+          <div className="weather-card-wrapper">
+            <WeatherCard
+              weather={weather}
+              selectedPlace={selectedPlace}
+            />
+          </div>
 
-        <WeatherCard
-          city={city}
-          weather={weather}
-        />
+          {/* FEATURES */}
+          <div className="features-wrapper">
 
-        <div className="features-section">
+            <FeatureCard
+              icon={<FaCloudSun />}
+              title="Accurate Forecast"
+              description="Get reliable and simple weather information."
+            />
 
-          <FeatureCard
-            icon={<FaCloudSun />}
-            title="Accurate Forecast"
-            description="Get reliable and simple weather information."
-            className="feature-blue"
-          />
+            <FeatureCard
+              icon={<FaCalendarDays />}
+              title="5-Day Forecast"
+              description="Plan your next five days with confidence."
+            />
 
-          <FeatureCard
-            icon={<FaCalendarDays />}
-            title="5-Day Forecast"
-            description="Plan your next five days with confidence."
-            className="feature-green"
-          />
+            <FeatureCard
+              icon={<FaMapLocationDot />}
+              title="City Search"
+              description="Search weather information for any city."
+            />
 
-          <FeatureCard
-            icon={<FaMapLocationDot />}
-            title="City Search"
-            description="Search weather information for any city."
-            className="feature-purple"
-          />
-
-        </div>
-
-      </section>
-
-
-      {/* ================= 5 DAY FORECAST ================= */}
-
-      <section className="forecast-section">
-
-        <div className="section-heading">
-
-          <h2>
-            <FaCalendarDays />
-            5-Day Forecast
-          </h2>
-
-          <button className="view-more">
-            View More →
-          </button>
+          </div>
 
         </div>
 
+        {/* FORECAST */}
+        <section className="forecast-section">
 
-        <div className="forecast-grid">
+          <div className="forecast-heading">
 
-          {loading ? (
+            <div className="forecast-title">
 
-            <p>
-              Loading 5-day forecast...
-            </p>
+              <FaCalendarDays />
 
-          ) : forecast.length > 0 ? (
+              <h2>
+                5-Day Forecast
+              </h2>
 
-            forecast.map(
-              (item, index) => (
+            </div>
 
+            <button className="view-more-btn">
+              View More →
+            </button>
+
+          </div>
+
+          <div className="forecast-grid">
+
+            {forecast.length > 0 ? (
+              forecast.map((day, index) => (
                 <ForecastCard
                   key={index}
-                  day={item.day}
-                  date={item.date}
-                  icon={item.icon}
-                  max={item.max}
-                  min={item.min}
-                  condition={item.condition}
+                  forecast={day}
                 />
+              ))
+            ) : (
+              <>
+                <ForecastCard />
+                <ForecastCard />
+                <ForecastCard />
+                <ForecastCard />
+                <ForecastCard />
+              </>
+            )}
 
-              )
-            )
+          </div>
 
-          ) : (
+        </section>
 
-            <p>
-              5-day forecast is not available.
-            </p>
+        {/* BOTTOM INFO */}
+        <section className="bottom-info">
 
-          )}
+          <div className="bottom-item">
 
-        </div>
-
-      </section>
-
-
-      {/* ================= EXTRA FEATURES ================= */}
-
-      <section className="extra-features">
-
-        <div className="info-card">
-
-          <div className="info-title">
             <FaLeaf />
-            <h3>Air Quality</h3>
-          </div>
-
-          <div className="circle-value air-quality">
-            <strong>42</strong>
-            <span>Good</span>
-          </div>
-
-          <p>
-            Air quality is good and comfortable
-            for outdoor activities.
-          </p>
-
-        </div>
-
-
-        <div className="info-card">
-
-          <div className="info-title">
-            <FaSun />
-            <h3>UV Index</h3>
-          </div>
-
-          <div className="circle-value uv-index">
-            <strong>6</strong>
-            <span>High</span>
-          </div>
-
-          <p>
-            Wear sunscreen and protect yourself
-            from strong sunlight.
-          </p>
-
-        </div>
-
-
-        <div className="info-card">
-
-          <div className="info-title">
-            <FaMoon />
-            <h3>Moon Phase</h3>
-          </div>
-
-          <div className="moon-content">
-
-            <div className="moon">
-              🌕
-            </div>
 
             <div>
-
               <strong>
-                Waxing Gibbous
+                Weather Made Simple
               </strong>
 
-              <p>
-                Illumination: 68%
-              </p>
-
+              <span>
+                Clear and useful information for your day.
+              </span>
             </div>
 
           </div>
 
-        </div>
+          <div className="bottom-item quote-item">
 
-      </section>
+            <FaQuoteLeft />
 
+            <div>
+              <strong>
+                Stay prepared.
+              </strong>
 
-      {/* ================= QUOTE ================= */}
+              <span>
+                Check the weather before you step out.
+              </span>
+            </div>
 
-      <section className="quote-section">
+          </div>
 
-        <FaQuoteLeft className="quote-icon" />
+        </section>
 
-        <div>
+      </main>
 
-          <p>
-            The best thing one can do when
-            it's raining is to let it rain.
-          </p>
-
-          <span>
-            — Henry Wadsworth Longfellow
-          </span>
-
-        </div>
-
-        <div className="quote-decoration">
-          ☂️
-        </div>
-
-      </section>
-
-
-      {/* ================= FOOTER ================= */}
-
-      <footer>
-
-        <p>
-          © 2026 Weather Report
-        </p>
-
-        <p>
-          Made with React ❤️
-        </p>
-
-      </footer>
-
-    </main>
+    </div>
   );
 }
 
