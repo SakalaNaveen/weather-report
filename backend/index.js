@@ -136,11 +136,6 @@ async function getMandalFromNominatim(latitude, longitude) {
         .trim();
     }
 
-    /*
-      Sometimes OSM stores mandal/subdistrict as county.
-      Only use county when it is different from district.
-    */
-
     const county = String(address.county || "").trim();
 
     if (
@@ -189,8 +184,15 @@ app.get("/api/locations", async (req, res) => {
           q: `${query}, India`,
           format: "jsonv2",
           addressdetails: 1,
-          limit: 10,
+
+          // Increased so matching villages/places
+          // are available before ranking.
+          limit: 50,
+
           countrycodes: "in",
+
+          dedupe: 0,
+
           "accept-language": "en",
         },
         headers: {
@@ -201,11 +203,6 @@ app.get("/api/locations", async (req, res) => {
     );
 
     const results = nominatimResponse.data || [];
-
-    /*
-      First create basic locations.
-      Do NOT call Overpass for every result immediately.
-    */
 
     const locations = await Promise.all(
       results.map(async (place) => {
@@ -232,19 +229,10 @@ app.get("/api/locations", async (req, res) => {
 
         const state = address.state || "";
 
-        /*
-          First try Nominatim's direct mandal/subdistrict fields.
-        */
-
         let mandal =
           address.subdistrict ||
           address.city_district ||
           "";
-
-        /*
-          Sometimes county is the mandal.
-          But do NOT use it when county is actually the district.
-        */
 
         const county = String(address.county || "").trim();
 
@@ -256,10 +244,6 @@ app.get("/api/locations", async (req, res) => {
           mandal = county;
         }
 
-        /*
-          Only if mandal is still missing, try reverse lookup.
-        */
-
         if (
           !mandal &&
           Number.isFinite(latitude) &&
@@ -270,11 +254,6 @@ app.get("/api/locations", async (req, res) => {
             longitude
           );
         }
-
-        /*
-          Last fallback: Overpass.
-          It is NOT called when Nominatim already gives mandal.
-        */
 
         if (
           !mandal &&
@@ -289,6 +268,7 @@ app.get("/api/locations", async (req, res) => {
 
         return {
           id: place.place_id,
+
           name: name.trim(),
 
           city: (
@@ -345,6 +325,8 @@ app.get("/api/locations", async (req, res) => {
         place.mandal.toLowerCase(),
         place.district.toLowerCase(),
         place.state.toLowerCase(),
+        place.latitude,
+        place.longitude,
       ].join("|");
 
       if (!seen.has(key)) {
@@ -352,6 +334,39 @@ app.get("/api/locations", async (req, res) => {
         uniqueLocations.push(place);
       }
     }
+
+    /* =====================================================
+       SEARCH RANKING
+
+       1. Exact name match
+       2. Name starts with typed text
+       3. Name contains typed text
+    ===================================================== */
+
+    const normalizedQuery = query.toLowerCase();
+
+    uniqueLocations.sort((a, b) => {
+      const aName = a.name.toLowerCase();
+      const bName = b.name.toLowerCase();
+
+      const getScore = (name) => {
+        if (name === normalizedQuery) {
+          return 0;
+        }
+
+        if (name.startsWith(normalizedQuery)) {
+          return 1;
+        }
+
+        if (name.includes(normalizedQuery)) {
+          return 2;
+        }
+
+        return 3;
+      };
+
+      return getScore(aName) - getScore(bName);
+    });
 
     return res.json({
       success: true,
@@ -460,6 +475,7 @@ app.get("/api/weather", async (req, res) => {
       success: true,
 
       city: weather.name,
+
       country: weather.sys?.country || "",
 
       temperature: Math.round(
