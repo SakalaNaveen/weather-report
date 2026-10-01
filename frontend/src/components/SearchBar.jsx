@@ -40,10 +40,9 @@ function SearchBar({ onSearch, onNormalSearch }) {
         setLoading(true);
         setShowSuggestions(true);
 
-        const url =
-          "https://weather-report-backend-iuxb.onrender.com/api/locations?query=" +
-          encodeURIComponent(query);
-
+       const url =
+  "http://localhost:5000/api/locations?query=" +
+  encodeURIComponent(query);
         console.log("Location URL:", url);
 
         const response = await fetch(url, {
