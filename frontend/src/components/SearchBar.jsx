@@ -14,6 +14,7 @@ function SearchBar({ onSearch, onNormalSearch }) {
 
   const searchBoxRef = useRef(null);
   const requestRef = useRef(null);
+  const searchIdRef = useRef(0);
 
   // ==========================================
   // LOCATION SEARCH WHILE TYPING
@@ -28,25 +29,32 @@ function SearchBar({ onSearch, onNormalSearch }) {
       return;
     }
 
+    // Cancel previous request
     if (requestRef.current) {
       requestRef.current.abort();
+      requestRef.current = null;
     }
 
-    const controller = new AbortController();
-    requestRef.current = controller;
+    // Give every search a unique ID
+    const currentSearchId = ++searchIdRef.current;
 
+    // Small debounce so we don't send a request for every keystroke
     const timer = setTimeout(async () => {
+      const controller = new AbortController();
+      requestRef.current = controller;
+
       try {
         setLoading(true);
         setShowSuggestions(true);
 
-      const API_BASE_URL = import.meta.env.DEV
-  ? "http://localhost:5000"
-  : "https://weather-report-backend-iuxb.onrender.com";
+        const API_BASE_URL = import.meta.env.DEV
+          ? "http://localhost:5000"
+          : "https://weather-report-backend-iuxb.onrender.com";
 
-const url =
-  `${API_BASE_URL}/api/locations?query=` +
-  encodeURIComponent(query);
+        const url =
+          `${API_BASE_URL}/api/locations?query=` +
+          encodeURIComponent(query);
+
         console.log("Location URL:", url);
 
         const response = await fetch(url, {
@@ -58,6 +66,11 @@ const url =
         const data = await response.json();
 
         console.log("Location response:", data);
+
+        // Ignore old/stale responses
+        if (currentSearchId !== searchIdRef.current) {
+          return;
+        }
 
         if (
           response.ok &&
@@ -76,20 +89,30 @@ const url =
           setSuggestions([]);
         }
       } catch (error) {
-        if (error.name !== "AbortError") {
+        if (
+          error.name !== "AbortError" &&
+          currentSearchId === searchIdRef.current
+        ) {
           console.error("Location search error:", error);
           setSuggestions([]);
         }
       } finally {
-        if (!controller.signal.aborted) {
+        if (
+          currentSearchId === searchIdRef.current &&
+          !controller.signal.aborted
+        ) {
           setLoading(false);
         }
       }
-    }, 50);
+    }, 350);
 
     return () => {
       clearTimeout(timer);
-      controller.abort();
+
+      if (requestRef.current) {
+        requestRef.current.abort();
+        requestRef.current = null;
+      }
     };
   }, [searchText]);
 
@@ -261,9 +284,7 @@ const url =
         </button>
       </div>
 
-      {/* ==========================================
-          SUGGESTIONS
-         ========================================== */}
+      {/* SUGGESTIONS */}
       {showSuggestions &&
         searchText.trim().length >= 1 && (
           <div className="suggestions-box">
