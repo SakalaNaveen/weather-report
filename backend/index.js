@@ -24,141 +24,34 @@ app.get("/", (req, res) => {
 });
 
 /* =========================================================
-   GET MANDAL FROM OPENSTREETMAP
-   FAST VERSION
+   LOCATION SEARCH CACHE + REQUEST CONTROL
 ========================================================= */
 
-const OVERPASS_SERVERS = [
-  "https://overpass-api.de/api/interpreter",
-  "https://overpass.kumi.systems/api/interpreter",
-];
+const locationCache = new Map();
 
-async function getMandalFromCoordinates(latitude, longitude) {
-  const query = `
-    [out:json][timeout:5];
-    is_in(${latitude},${longitude});
-    rel(pivot._)
-      ["boundary"="administrative"]
-      ["admin_level"="6"];
-    out tags;
-  `;
+const LOCATION_CACHE_TIME = 10 * 60 * 1000;
 
-  for (const server of OVERPASS_SERVERS) {
-    try {
-      const response = await axios.get(server, {
-        params: {
-          data: query,
-        },
-        timeout: 6000,
-        headers: {
-          "User-Agent": "WeatherReportApp/1.0",
-        },
-      });
+// Nominatim public service should not receive rapid requests.
+let lastNominatimRequestTime = 0;
+let nominatimQueue = Promise.resolve();
 
-      const elements = response.data?.elements || [];
+function waitForNominatimSlot() {
+  const task = nominatimQueue.then(async () => {
+    const now = Date.now();
+    const elapsed = now - lastNominatimRequestTime;
 
-      if (elements.length > 0) {
-        const tags = elements[0].tags || {};
-
-        let mandal =
-          tags["name:en"] ||
-          tags.name ||
-          tags["official_name:en"] ||
-          tags.official_name ||
-          "";
-
-        if (mandal) {
-          mandal = mandal
-            .replace(/\s+mandal$/i, "")
-            .replace(/\s+tehsil$/i, "")
-            .replace(/\s+taluk$/i, "")
-            .replace(/\s+taluka$/i, "")
-            .trim();
-
-          return mandal;
-        }
-      }
-    } catch (error) {
-      console.log(
-        "Overpass server skipped:",
-        server,
-        error.code || error.message
+    if (elapsed < 1100) {
+      await new Promise((resolve) =>
+        setTimeout(resolve, 1100 - elapsed)
       );
     }
-  }
 
-  return "";
-}
+    lastNominatimRequestTime = Date.now();
+  });
 
-/* =========================================================
-   GET MANDAL FROM NOMINATIM REVERSE
-   This is tried before Overpass because it is faster.
-========================================================= */
+  nominatimQueue = task.catch(() => {});
 
-async function getMandalFromNominatim(latitude, longitude) {
-  try {
-    const response = await axios.get(
-      "https://nominatim.openstreetmap.org/reverse",
-      {
-        params: {
-          lat: latitude,
-          lon: longitude,
-          format: "jsonv2",
-          addressdetails: 1,
-          zoom: 18,
-          "accept-language": "en",
-        },
-        headers: {
-          "User-Agent": "WeatherReportApp/1.0",
-        },
-        timeout: 5000,
-      }
-    );
-
-    const address = response.data?.address || {};
-
-    const district =
-      address.state_district ||
-      address.district ||
-      "";
-
-    const possibleMandal =
-      address.subdistrict ||
-      address.city_district ||
-      "";
-
-    if (possibleMandal) {
-      return possibleMandal
-        .replace(/\s+mandal$/i, "")
-        .replace(/\s+tehsil$/i, "")
-        .replace(/\s+taluk$/i, "")
-        .replace(/\s+taluka$/i, "")
-        .trim();
-    }
-
-    const county = String(address.county || "").trim();
-
-    if (
-      county &&
-      county.toLowerCase() !== district.toLowerCase()
-    ) {
-      return county
-        .replace(/\s+mandal$/i, "")
-        .replace(/\s+tehsil$/i, "")
-        .replace(/\s+taluk$/i, "")
-        .replace(/\s+taluka$/i, "")
-        .trim();
-    }
-
-    return "";
-  } catch (error) {
-    console.log(
-      "Nominatim reverse mandal lookup skipped:",
-      error.code || error.message
-    );
-
-    return "";
-  }
+  return task;
 }
 
 /* =========================================================
@@ -177,6 +70,34 @@ app.get("/api/locations", async (req, res) => {
       });
     }
 
+    const normalizedQuery = query.toLowerCase();
+
+    /* =====================================================
+       CACHE
+    ===================================================== */
+
+    const cached = locationCache.get(normalizedQuery);
+
+    if (
+      cached &&
+      Date.now() - cached.timestamp < LOCATION_CACHE_TIME
+    ) {
+      return res.json({
+        success: true,
+        locations: cached.locations,
+      });
+    }
+
+    /* =====================================================
+       WAIT BEFORE Nominatim REQUEST
+    ===================================================== */
+
+    await waitForNominatimSlot();
+
+    /* =====================================================
+       NOMINATIM SEARCH
+    ===================================================== */
+
     const nominatimResponse = await axios.get(
       "https://nominatim.openstreetmap.org/search",
       {
@@ -184,120 +105,109 @@ app.get("/api/locations", async (req, res) => {
           q: `${query}, India`,
           format: "jsonv2",
           addressdetails: 1,
-
-          // Increased so matching villages/places
-          // are available before ranking.
           limit: 50,
-
           countrycodes: "in",
-
           dedupe: 0,
-
           "accept-language": "en",
         },
         headers: {
-          "User-Agent": "WeatherReportApp/1.0",
+          "User-Agent":
+            "WeatherReportApp/1.0 (location search)",
         },
-        timeout: 8000,
+        timeout: 10000,
       }
     );
 
-    const results = nominatimResponse.data || [];
+    const results = Array.isArray(nominatimResponse.data)
+      ? nominatimResponse.data
+      : [];
 
-    const locations = await Promise.all(
-      results.map(async (place) => {
-        const address = place.address || {};
+    /* =====================================================
+       CONVERT RESULTS
+       IMPORTANT:
+       Do NOT call reverse Nominatim or Overpass here.
+       This keeps autocomplete fast and stable.
+    ===================================================== */
 
-        const latitude = Number(place.lat);
-        const longitude = Number(place.lon);
+    const locations = results.map((place) => {
+      const address = place.address || {};
 
-        const name =
-          address.village ||
-          address.town ||
+      const latitude = Number(place.lat);
+      const longitude = Number(place.lon);
+
+      const name =
+        address.village ||
+        address.town ||
+        address.city ||
+        address.municipality ||
+        address.suburb ||
+        address.hamlet ||
+        address.locality ||
+        place.name ||
+        place.display_name?.split(",")[0] ||
+        "";
+
+      const district =
+        address.state_district ||
+        address.district ||
+        "";
+
+      const state = address.state || "";
+
+      let mandal =
+        address.subdistrict ||
+        address.city_district ||
+        "";
+
+      const county = String(
+        address.county || ""
+      ).trim();
+
+      /*
+        In many Andhra Pradesh locations,
+        OSM stores the mandal in county.
+      */
+
+      if (
+        !mandal &&
+        county &&
+        county.toLowerCase() !==
+          district.toLowerCase()
+      ) {
+        mandal = county;
+      }
+
+      return {
+        id: place.place_id,
+
+        name: String(name).trim(),
+
+        city: String(
           address.city ||
-          address.municipality ||
-          address.suburb ||
-          address.hamlet ||
-          place.name ||
-          place.display_name?.split(",")[0] ||
-          "";
-
-        const district =
-          address.state_district ||
-          address.district ||
-          "";
-
-        const state = address.state || "";
-
-        let mandal =
-          address.subdistrict ||
-          address.city_district ||
-          "";
-
-        const county = String(address.county || "").trim();
-
-        if (
-          !mandal &&
-          county &&
-          county.toLowerCase() !== district.toLowerCase()
-        ) {
-          mandal = county;
-        }
-
-        if (
-          !mandal &&
-          Number.isFinite(latitude) &&
-          Number.isFinite(longitude)
-        ) {
-          mandal = await getMandalFromNominatim(
-            latitude,
-            longitude
-          );
-        }
-
-        if (
-          !mandal &&
-          Number.isFinite(latitude) &&
-          Number.isFinite(longitude)
-        ) {
-          mandal = await getMandalFromCoordinates(
-            latitude,
-            longitude
-          );
-        }
-
-        return {
-          id: place.place_id,
-
-          name: name.trim(),
-
-          city: (
-            address.city ||
             address.town ||
             address.municipality ||
             ""
-          ).trim(),
+        ).trim(),
 
-          mandal: String(mandal || "").trim(),
+        mandal: String(mandal || "").trim(),
 
-          district: district.trim(),
+        district: String(district).trim(),
 
-          state: state.trim(),
+        state: String(state).trim(),
 
-          country: address.country || "India",
+        country: address.country || "India",
 
-          countryCode: (
-            address.country_code || "in"
-          ).toUpperCase(),
+        countryCode: String(
+          address.country_code || "in"
+        ).toUpperCase(),
 
-          latitude,
+        latitude,
 
-          longitude,
+        longitude,
 
-          type: place.type || "",
-        };
-      })
-    );
+        type: place.type || "",
+      };
+    });
 
     /* =====================================================
        INDIA ONLY
@@ -338,12 +248,10 @@ app.get("/api/locations", async (req, res) => {
     /* =====================================================
        SEARCH RANKING
 
-       1. Exact name match
-       2. Name starts with typed text
-       3. Name contains typed text
+       1. Exact name
+       2. Starts with query
+       3. Contains query
     ===================================================== */
-
-    const normalizedQuery = query.toLowerCase();
 
     uniqueLocations.sort((a, b) => {
       const aName = a.name.toLowerCase();
@@ -365,17 +273,50 @@ app.get("/api/locations", async (req, res) => {
         return 3;
       };
 
-      return getScore(aName) - getScore(bName);
+      const scoreDifference =
+        getScore(aName) - getScore(bName);
+
+      if (scoreDifference !== 0) {
+        return scoreDifference;
+      }
+
+      return aName.localeCompare(bName);
     });
+
+    const finalLocations =
+      uniqueLocations.slice(0, 10);
+
+    /* =====================================================
+       SAVE IN CACHE
+    ===================================================== */
+
+    locationCache.set(normalizedQuery, {
+      timestamp: Date.now(),
+      locations: finalLocations,
+    });
+
+    /* =====================================================
+       CLEAN OLD CACHE ENTRIES
+    ===================================================== */
+
+    if (locationCache.size > 100) {
+      const oldestKey =
+        locationCache.keys().next().value;
+
+      if (oldestKey) {
+        locationCache.delete(oldestKey);
+      }
+    }
 
     return res.json({
       success: true,
-      locations: uniqueLocations.slice(0, 10),
+      locations: finalLocations,
     });
   } catch (error) {
     console.error(
       "Location search error:",
-      error.response?.data || error.message
+      error.response?.data ||
+        error.message
     );
 
     return res.status(500).json({
@@ -392,7 +333,9 @@ app.get("/api/locations", async (req, res) => {
 
 app.get("/api/weather", async (req, res) => {
   try {
-    const city = String(req.query.city || "").trim();
+    const city = String(
+      req.query.city || ""
+    ).trim();
 
     const lat = req.query.lat;
     const lon = req.query.lon;
@@ -400,7 +343,8 @@ app.get("/api/weather", async (req, res) => {
     if (!city && (!lat || !lon)) {
       return res.status(400).json({
         success: false,
-        message: "City name or coordinates are required",
+        message:
+          "City name or coordinates are required",
       });
     }
 
@@ -447,18 +391,21 @@ app.get("/api/weather", async (req, res) => {
     let rainChance = 0;
 
     try {
-      const forecastResponse = await axios.get(
-        "https://api.openweathermap.org/data/2.5/forecast",
-        {
-          params,
-          timeout: 15000,
-        }
-      );
+      const forecastResponse =
+        await axios.get(
+          "https://api.openweathermap.org/data/2.5/forecast",
+          {
+            params,
+            timeout: 15000,
+          }
+        );
 
       const firstForecast =
         forecastResponse.data?.list?.[0];
 
-      if (firstForecast?.pop !== undefined) {
+      if (
+        firstForecast?.pop !== undefined
+      ) {
         rainChance = Math.round(
           firstForecast.pop * 100
         );
@@ -476,7 +423,8 @@ app.get("/api/weather", async (req, res) => {
 
       city: weather.name,
 
-      country: weather.sys?.country || "",
+      country:
+        weather.sys?.country || "",
 
       temperature: Math.round(
         weather.main?.temp ?? 0
@@ -486,61 +434,77 @@ app.get("/api/weather", async (req, res) => {
         weather.main?.feels_like ?? 0
       ),
 
-      humidity: weather.main?.humidity ?? 0,
+      humidity:
+        weather.main?.humidity ?? 0,
 
       windSpeed:
         Math.round(
-          ((weather.wind?.speed ?? 0) * 3.6) * 10
+          ((weather.wind?.speed ?? 0) *
+            3.6) *
+            10
         ) / 10,
 
-      pressure: weather.main?.pressure ?? 0,
+      pressure:
+        weather.main?.pressure ?? 0,
 
       visibility:
         Math.round(
-          (weather.visibility ?? 0) / 100
+          (weather.visibility ?? 0) /
+            100
         ) / 10,
 
       condition:
         weather.weather?.[0]?.main || "",
 
       description:
-        weather.weather?.[0]?.description || "",
+        weather.weather?.[0]
+          ?.description || "",
 
       icon:
         weather.weather?.[0]?.icon || "",
 
       rain:
-        Math.round(rainAmount * 10) / 10,
+        Math.round(
+          rainAmount * 10
+        ) / 10,
 
       rainChance,
 
       sunrise: weather.sys?.sunrise
         ? new Date(
             weather.sys.sunrise * 1000
-          ).toLocaleTimeString("en-IN", {
-            hour: "2-digit",
-            minute: "2-digit",
-            hour12: true,
-          })
+          ).toLocaleTimeString(
+            "en-IN",
+            {
+              hour: "2-digit",
+              minute: "2-digit",
+              hour12: true,
+            }
+          )
         : "",
 
       sunset: weather.sys?.sunset
         ? new Date(
             weather.sys.sunset * 1000
-          ).toLocaleTimeString("en-IN", {
-            hour: "2-digit",
-            minute: "2-digit",
-            hour12: true,
-          })
+          ).toLocaleTimeString(
+            "en-IN",
+            {
+              hour: "2-digit",
+              minute: "2-digit",
+              hour12: true,
+            }
+          )
         : "",
     });
   } catch (error) {
     console.error(
       "Weather API error:",
-      error.response?.data || error.message
+      error.response?.data ||
+        error.message
     );
 
-    const status = error.response?.status || 500;
+    const status =
+      error.response?.status || 500;
 
     return res.status(status).json({
       success: false,
@@ -555,125 +519,150 @@ app.get("/api/weather", async (req, res) => {
    5-DAY FORECAST
 ========================================================= */
 
-app.get("/api/weather/forecast", async (req, res) => {
-  try {
-    const city = String(req.query.city || "").trim();
+app.get(
+  "/api/weather/forecast",
+  async (req, res) => {
+    try {
+      const city = String(
+        req.query.city || ""
+      ).trim();
 
-    const lat = req.query.lat;
-    const lon = req.query.lon;
+      const lat = req.query.lat;
+      const lon = req.query.lon;
 
-    if (!city && (!lat || !lon)) {
-      return res.status(400).json({
-        success: false,
-        message: "City name or coordinates are required",
+      if (!city && (!lat || !lon)) {
+        return res.status(400).json({
+          success: false,
+          message:
+            "City name or coordinates are required",
+        });
+      }
+
+      if (!process.env.WEATHER_API_KEY) {
+        return res.status(500).json({
+          success: false,
+          message:
+            "WEATHER_API_KEY is missing",
+        });
+      }
+
+      const params = {
+        appid:
+          process.env.WEATHER_API_KEY,
+        units: "metric",
+      };
+
+      if (
+        lat !== undefined &&
+        lon !== undefined &&
+        Number.isFinite(Number(lat)) &&
+        Number.isFinite(Number(lon))
+      ) {
+        params.lat = Number(lat);
+        params.lon = Number(lon);
+      } else {
+        params.q = city;
+      }
+
+      const response = await axios.get(
+        "https://api.openweathermap.org/data/2.5/forecast",
+        {
+          params,
+          timeout: 15000,
+        }
+      );
+
+      const list =
+        response.data?.list || [];
+
+      const grouped = {};
+
+      list.forEach((item) => {
+        const date =
+          item.dt_txt?.split(" ")[0];
+
+        if (!date) return;
+
+        if (!grouped[date]) {
+          grouped[date] = [];
+        }
+
+        grouped[date].push(item);
       });
-    }
 
-    if (!process.env.WEATHER_API_KEY) {
+      const forecast =
+        Object.entries(grouped)
+          .slice(0, 5)
+          .map(([date, items]) => {
+            const temperatures =
+              items.map(
+                (item) =>
+                  item.main?.temp ?? 0
+              );
+
+            const first = items[0];
+
+            const rainChance =
+              Math.round(
+                Math.max(
+                  ...items.map(
+                    (item) =>
+                      (item.pop || 0) *
+                      100
+                  )
+                )
+              );
+
+            return {
+              date,
+
+              maxTemp: Math.round(
+                Math.max(
+                  ...temperatures
+                )
+              ),
+
+              minTemp: Math.round(
+                Math.min(
+                  ...temperatures
+                )
+              ),
+
+              condition:
+                first.weather?.[0]
+                  ?.main || "",
+
+              description:
+                first.weather?.[0]
+                  ?.description || "",
+
+              icon:
+                first.weather?.[0]
+                  ?.icon || "",
+
+              rainChance,
+            };
+          });
+
+      return res.json({
+        success: true,
+        forecast,
+      });
+    } catch (error) {
+      console.error(
+        "Forecast API error:",
+        error.response?.data ||
+          error.message
+      );
+
       return res.status(500).json({
         success: false,
-        message: "WEATHER_API_KEY is missing",
+        message:
+          "Unable to fetch forecast",
       });
     }
-
-    const params = {
-      appid: process.env.WEATHER_API_KEY,
-      units: "metric",
-    };
-
-    if (
-      lat !== undefined &&
-      lon !== undefined &&
-      Number.isFinite(Number(lat)) &&
-      Number.isFinite(Number(lon))
-    ) {
-      params.lat = Number(lat);
-      params.lon = Number(lon);
-    } else {
-      params.q = city;
-    }
-
-    const response = await axios.get(
-      "https://api.openweathermap.org/data/2.5/forecast",
-      {
-        params,
-        timeout: 15000,
-      }
-    );
-
-    const list = response.data?.list || [];
-
-    const grouped = {};
-
-    list.forEach((item) => {
-      const date = item.dt_txt?.split(" ")[0];
-
-      if (!date) return;
-
-      if (!grouped[date]) {
-        grouped[date] = [];
-      }
-
-      grouped[date].push(item);
-    });
-
-    const forecast = Object.entries(grouped)
-      .slice(0, 5)
-      .map(([date, items]) => {
-        const temperatures = items.map(
-          (item) => item.main?.temp ?? 0
-        );
-
-        const first = items[0];
-
-        const rainChance = Math.round(
-          Math.max(
-            ...items.map(
-              (item) => (item.pop || 0) * 100
-            )
-          )
-        );
-
-        return {
-          date,
-
-          maxTemp: Math.round(
-            Math.max(...temperatures)
-          ),
-
-          minTemp: Math.round(
-            Math.min(...temperatures)
-          ),
-
-          condition:
-            first.weather?.[0]?.main || "",
-
-          description:
-            first.weather?.[0]?.description || "",
-
-          icon:
-            first.weather?.[0]?.icon || "",
-
-          rainChance,
-        };
-      });
-
-    return res.json({
-      success: true,
-      forecast,
-    });
-  } catch (error) {
-    console.error(
-      "Forecast API error:",
-      error.response?.data || error.message
-    );
-
-    return res.status(500).json({
-      success: false,
-      message: "Unable to fetch forecast",
-    });
   }
-});
+);
 
 /* =========================================================
    START SERVER
