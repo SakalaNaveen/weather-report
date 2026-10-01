@@ -40,8 +40,12 @@ function SearchBar({ onSearch, onNormalSearch }) {
         setLoading(true);
         setShowSuggestions(true);
 
-       const url =
-  "http://localhost:5000/api/locations?query=" +
+      const API_BASE_URL = import.meta.env.DEV
+  ? "http://localhost:5000"
+  : "https://weather-report-backend-iuxb.onrender.com";
+
+const url =
+  `${API_BASE_URL}/api/locations?query=` +
   encodeURIComponent(query);
         console.log("Location URL:", url);
 
